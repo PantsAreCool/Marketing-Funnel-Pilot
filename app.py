@@ -1254,68 +1254,61 @@ def render_ab_comparison(df: pd.DataFrame):
             create_export_section(stage_comp, "ab_comparison")
 
 
-def render_experiment_simulator(funnel_counts: pd.DataFrame, user_flags: pd.DataFrame):
+SIMULATOR_PRESETS = {
+    "Custom": (None, None, None),
+    "Improve Signup UX (+15%)": (15, 0, 0),
+    "Improve Onboarding (+20%)": (0, 20, 0),
+    "Improve Checkout (+25%)": (0, 0, 25),
+    "All Stages (+10%)": (10, 10, 10),
+}
+
+
+def render_simulator_sidebar() -> tuple:
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("## Impact Simulator")
+
+    preset = st.sidebar.selectbox(
+        "Scenario Preset",
+        options=list(SIMULATOR_PRESETS.keys()),
+        key="sim_preset",
+        help="Select a preset or choose Custom to set your own values"
+    )
+
+    preset_vals = SIMULATOR_PRESETS[preset]
+
+    if preset_vals[0] is not None:
+        st.sidebar.markdown(f"- Visit → Signup: **+{preset_vals[0]}%**")
+        st.sidebar.markdown(f"- Signup → Activation: **+{preset_vals[1]}%**")
+        st.sidebar.markdown(f"- Activation → Purchase: **+{preset_vals[2]}%**")
+        return preset_vals
+    else:
+        l1 = st.sidebar.slider(
+            "Visit → Signup improvement (%)",
+            min_value=0, max_value=50, step=1,
+            key="sim_lift1"
+        )
+        l2 = st.sidebar.slider(
+            "Signup → Activation improvement (%)",
+            min_value=0, max_value=50, step=1,
+            key="sim_lift2"
+        )
+        l3 = st.sidebar.slider(
+            "Activation → Purchase improvement (%)",
+            min_value=0, max_value=50, step=1,
+            key="sim_lift3"
+        )
+        return (l1, l2, l3)
+
+
+def render_experiment_simulator(funnel_counts: pd.DataFrame, user_flags: pd.DataFrame, lift_values: tuple):
     st.markdown('<div class="section-header">Experiment Impact Simulator</div>', unsafe_allow_html=True)
-    st.markdown("Simulate improvements at each funnel stage and see how changes propagate downstream.")
+    st.markdown("Simulate improvements at each funnel stage and see how changes propagate downstream. Use the sidebar controls to adjust improvement percentages or select a preset scenario.")
 
     baseline = compute_baseline_metrics(funnel_counts, user_flags)
 
-    if "sim_values" not in st.session_state:
-        st.session_state["sim_values"] = [0, 0, 0]
-
-    def _apply_preset(l1, l2, l3):
-        st.session_state["sim_values"] = [l1, l2, l3]
-        for k in ["sim_lift1", "sim_lift2", "sim_lift3"]:
-            if k in st.session_state:
-                del st.session_state[k]
-
-    def _sync_slider(idx, key):
-        st.session_state["sim_values"][idx] = st.session_state[key]
-
-    st.markdown("#### Preset Scenarios")
-    preset_cols = st.columns(4)
-    with preset_cols[0]:
-        st.button("Improve Signup UX", key="preset_signup", use_container_width=True,
-                  on_click=_apply_preset, args=(15, 0, 0))
-    with preset_cols[1]:
-        st.button("Improve Onboarding", key="preset_onboard", use_container_width=True,
-                  on_click=_apply_preset, args=(0, 20, 0))
-    with preset_cols[2]:
-        st.button("Improve Checkout", key="preset_checkout", use_container_width=True,
-                  on_click=_apply_preset, args=(0, 0, 25))
-    with preset_cols[3]:
-        st.button("Reset All", key="preset_reset", use_container_width=True,
-                  on_click=_apply_preset, args=(0, 0, 0))
-
-    slider_cols = st.columns(3)
-    with slider_cols[0]:
-        lift1_pct = st.slider(
-            "Visit → Signup improvement (%)",
-            min_value=0, max_value=50, step=1,
-            value=st.session_state["sim_values"][0],
-            key="sim_lift1",
-            on_change=_sync_slider, args=(0, "sim_lift1")
-        )
-    with slider_cols[1]:
-        lift2_pct = st.slider(
-            "Signup → Activation improvement (%)",
-            min_value=0, max_value=50, step=1,
-            value=st.session_state["sim_values"][1],
-            key="sim_lift2",
-            on_change=_sync_slider, args=(1, "sim_lift2")
-        )
-    with slider_cols[2]:
-        lift3_pct = st.slider(
-            "Activation → Purchase improvement (%)",
-            min_value=0, max_value=50, step=1,
-            value=st.session_state["sim_values"][2],
-            key="sim_lift3",
-            on_change=_sync_slider, args=(2, "sim_lift3")
-        )
-
-    lift1 = lift1_pct / 100.0
-    lift2 = lift2_pct / 100.0
-    lift3 = lift3_pct / 100.0
+    lift1 = lift_values[0] / 100.0
+    lift2 = lift_values[1] / 100.0
+    lift3 = lift_values[2] / 100.0
 
     simulated = simulate_funnel_impact(baseline, lift1, lift2, lift3)
     deltas = compute_deltas(baseline, simulated)
@@ -1417,6 +1410,8 @@ def render_dashboard():
     
     render_kpis(processed_data["conversion_rates"], processed_data["user_flags"])
     
+    sim_lifts = render_simulator_sidebar()
+    
     main_tab1, main_tab2, main_tab3, main_tab4, main_tab5, main_tab6 = st.tabs([
         "Funnel Analysis", "Cohort Analysis", "Revenue Analytics", "User Journeys", "A/B Comparison", "Impact Simulator"
     ])
@@ -1441,7 +1436,7 @@ def render_dashboard():
         render_ab_comparison(filtered_df)
     
     with main_tab6:
-        render_experiment_simulator(processed_data["funnel_counts"], processed_data["user_flags"])
+        render_experiment_simulator(processed_data["funnel_counts"], processed_data["user_flags"], sim_lifts)
     
     st.markdown("---")
     st.markdown(
