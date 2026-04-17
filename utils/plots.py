@@ -736,3 +736,80 @@ def create_simulator_incremental_chart(deltas: dict) -> go.Figure:
     )
 
     return fig
+
+
+def create_feature_importance_chart(stages_dict: dict, top_n: int = 8) -> go.Figure:
+    """
+    Heatmap-style chart of learned feature coefficients across funnel stages.
+
+    Args:
+        stages_dict: dict from utils.ml_simulator.train_funnel_models()["stages"]
+        top_n: number of top features (by max absolute coefficient) to display
+
+    Returns:
+        Plotly Figure object (heatmap of coefficients)
+    """
+    stage_keys = [("conv1", "Signup"), ("conv2", "Activation"), ("conv3", "Purchase")]
+
+    frames = []
+    for key, label in stage_keys:
+        s = stages_dict.get(key)
+        if s and s.get("trained") and not s["feature_importance"].empty:
+            df = s["feature_importance"].copy()
+            df["stage"] = label
+            frames.append(df)
+
+    if not frames:
+        fig = go.Figure()
+        fig.update_layout(
+            title="Feature Importance (no models trained)",
+            height=320,
+            annotations=[dict(
+                text="Not enough data to train models on the current filter.",
+                xref="paper", yref="paper", showarrow=False, x=0.5, y=0.5
+            )]
+        )
+        return fig
+
+    combined = pd.concat(frames, ignore_index=True)
+
+    feature_max = (
+        combined.assign(abs_coef=combined["coefficient"].abs())
+        .groupby("feature")["abs_coef"].max()
+        .sort_values(ascending=False)
+    )
+    top_features = feature_max.head(top_n).index.tolist()
+    combined = combined[combined["feature"].isin(top_features)]
+
+    pivot = combined.pivot_table(
+        index="feature", columns="stage", values="coefficient", fill_value=0
+    )
+    stage_order = [label for _, label in stage_keys if label in pivot.columns]
+    pivot = pivot[stage_order]
+    pivot = pivot.loc[[f for f in top_features if f in pivot.index]]
+
+    z = pivot.values
+    abs_max = max(abs(z.min()), abs(z.max()), 1e-6)
+
+    fig = go.Figure(
+        go.Heatmap(
+            z=z,
+            x=pivot.columns.tolist(),
+            y=pivot.index.tolist(),
+            colorscale="RdBu",
+            zmid=0,
+            zmin=-abs_max,
+            zmax=abs_max,
+            text=[[f"{v:+.2f}" for v in row] for row in z],
+            texttemplate="%{text}",
+            colorbar=dict(title="Coef"),
+            hovertemplate="%{y}<br>Stage: %{x}<br>Coefficient: %{z:.3f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Learned Feature Importance per Funnel Stage (logistic regression coefficients)",
+        height=420,
+        margin=dict(l=20, r=20, t=70, b=20),
+        yaxis=dict(autorange="reversed"),
+    )
+    return fig

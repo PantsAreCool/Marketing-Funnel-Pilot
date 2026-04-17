@@ -43,13 +43,20 @@ The codebase follows a clean separation of concerns:
 - Supports cohort analysis, revenue metrics, and A/B comparison
 - Uses DuckDB for SQL-based analytical queries
 
-### Experiment Impact Simulator (`utils/simulator.py`)
-- Deterministic what-if calculator for funnel improvements
-- `compute_baseline_metrics()`: Extracts current funnel counts, conversion rates, and revenue-per-user
-- `simulate_funnel_impact()`: Applies percentage lifts to each stage and recomputes downstream funnel
-- `compute_deltas()`: Calculates incremental gains (users and revenue) between baseline and simulated
-- `generate_insight()`: Produces plain-English analysis identifying highest-leverage stage and compounding effects
-- Preset scenarios: "Improve Signup UX" (15%), "Improve Onboarding" (20%), "Improve Checkout" (25%)
+### Experiment Impact Simulator
+Two layers — deterministic baseline (`utils/simulator.py`) and ML-powered simulator (`utils/ml_simulator.py`):
+
+**Deterministic (`utils/simulator.py`)**:
+- `compute_baseline_metrics()`, `simulate_funnel_impact()`, `compute_deltas()`, `generate_insight()`
+- Applies flat percentage lifts to aggregate conversion rates
+
+**ML-powered (`utils/ml_simulator.py`)**: actively used in the UI
+- `train_funnel_models()`: Trains one **logistic regression** (scikit-learn) per funnel transition (Visit→Signup, Signup→Activation, Activation→Purchase) using one-hot encoded user features (traffic_source, device, country)
+- `_apply_lift_to_probs()`: Applies lift via Bayesian odds-ratio update — `new_odds = old_odds * (1 + lift)` — guaranteed monotonic and clipped to [0,1]
+- `simulate_with_models()`: Computes a per-stage multiplicative ratio (lifted population sum / baseline population sum) from the trained models and applies it to actual funnel counts
+- `compute_ml_deltas()`, `generate_ml_insight()`: Diagnostics + plain-English insight including model AUC and top learned drivers
+- Reports per-stage AUC, accuracy, sample sizes and a feature-importance heatmap (`create_feature_importance_chart` in `utils/plots.py`)
+- Preset scenarios in sidebar: "Improve Signup UX (+15%)", "Improve Onboarding (+20%)", "Improve Checkout (+25%)", "All Stages (+10%)", or fully custom sliders
 
 ### Visualization Layer (`utils/plots.py`)
 - Plotly-based interactive charts

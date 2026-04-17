@@ -70,13 +70,20 @@ from utils.plots import (
     create_ab_conversion_comparison,
     create_ab_summary_chart,
     create_simulator_funnel_comparison,
-    create_simulator_incremental_chart
+    create_simulator_incremental_chart,
+    create_feature_importance_chart
 )
 from utils.simulator import (
     compute_baseline_metrics,
     simulate_funnel_impact,
     compute_deltas,
     generate_insight
+)
+from utils.ml_simulator import (
+    train_funnel_models,
+    simulate_with_models,
+    compute_ml_deltas,
+    generate_ml_insight
 )
 
 
@@ -1300,31 +1307,89 @@ def render_simulator_sidebar() -> tuple:
         return (l1, l2, l3)
 
 
-def render_experiment_simulator(funnel_counts: pd.DataFrame, user_flags: pd.DataFrame, lift_values: tuple):
-    st.markdown('<div class="section-header">Experiment Impact Simulator</div>', unsafe_allow_html=True)
-    st.markdown("Simulate improvements at each funnel stage and see how changes propagate downstream. Use the sidebar controls to adjust improvement percentages or select a preset scenario.")
+@st.cache_data(show_spinner=False)
+def _train_models_cached(user_flags: pd.DataFrame) -> dict:
+    """Cache trained models for the current user_flags slice."""
+    return train_funnel_models(user_flags)
 
-    baseline = compute_baseline_metrics(funnel_counts, user_flags)
+
+def render_experiment_simulator(funnel_counts: pd.DataFrame, user_flags: pd.DataFrame, lift_values: tuple):
+    st.markdown('<div class="section-header">ML-Powered Experiment Impact Simulator</div>', unsafe_allow_html=True)
+    st.markdown(
+        "This simulator trains **logistic regression models** on each funnel transition "
+        "(Visit\u2192Signup, Signup\u2192Activation, Activation\u2192Purchase) using user features "
+        "(traffic source, device, country). When you apply a lift, the model boosts each "
+        "user's predicted log-odds for that stage and recomputes the expected funnel."
+    )
+
+    with st.spinner("Training ML models on funnel data\u2026"):
+        models = _train_models_cached(user_flags)
 
     lift1 = lift_values[0] / 100.0
     lift2 = lift_values[1] / 100.0
     lift3 = lift_values[2] / 100.0
+    has_lift = (lift1 + lift2 + lift3) > 0
 
-    simulated = simulate_funnel_impact(baseline, lift1, lift2, lift3)
-    deltas = compute_deltas(baseline, simulated)
+    sim = simulate_with_models(user_flags, models, lift1, lift2, lift3)
+    baseline = sim["baseline"]
+    simulated = sim["simulated"]
+    deltas = compute_ml_deltas(sim)
 
-    st.markdown("#### Impact Summary")
-    kpi_cols = st.columns(5)
+    if has_lift:
+        st.success(
+            f"**Scenario applied:** Visit\u2192Signup +{lift_values[0]}% \u00b7 "
+            f"Signup\u2192Activation +{lift_values[1]}% \u00b7 "
+            f"Activation\u2192Purchase +{lift_values[2]}%"
+        )
+    else:
+        st.warning(
+            "**No lift applied yet** \u2014 baseline = simulated. "
+            "Pick a preset in the sidebar (e.g. 'Improve Signup UX (+15%)') "
+            "or switch to Custom mode and move a slider to see the model react."
+        )
+
+    st.markdown("### Before vs After (model-predicted)")
+    bcol, acol, dcol = st.columns(3)
+    with bcol:
+        st.markdown("#### Baseline (actual)")
+        st.metric("Visits", f"{baseline['visited']:,}")
+        st.metric("Signups", f"{baseline['signed_up']:,}")
+        st.metric("Activations", f"{baseline['activated']:,}")
+        st.metric("Purchases", f"{baseline['purchased']:,}")
+        st.metric("Revenue", f"${baseline['total_revenue']:,.0f}")
+    with acol:
+        st.markdown("#### Simulated (ML)")
+        st.metric("Visits", f"{simulated['visited']:,.0f}")
+        st.metric("Signups", f"{simulated['signed_up']:,.0f}")
+        st.metric("Activations", f"{simulated['activated']:,.0f}")
+        st.metric("Purchases", f"{simulated['purchased']:,.0f}")
+        st.metric("Revenue", f"${simulated['total_revenue']:,.0f}")
+    with dcol:
+        st.markdown("#### Difference")
+        st.metric("\u0394 Visits", "+0")
+        st.metric("\u0394 Signups", f"{deltas['delta_signups']:+,.0f}")
+        st.metric("\u0394 Activations", f"{deltas['delta_activations']:+,.0f}")
+        st.metric("\u0394 Purchases", f"{deltas['delta_purchases']:+,.0f}")
+        st.metric("\u0394 Revenue", f"${deltas['delta_revenue']:+,.0f}")
+
+    st.markdown("### Headline Impact")
+    kpi_cols = st.columns(3)
     with kpi_cols[0]:
-        st.metric("Additional Signups", f"+{deltas['delta_signups']:,.0f}")
+        st.metric(
+            "Overall Conversion",
+            f"{deltas['simulated_overall']*100:.2f}%",
+            delta=f"{(deltas['simulated_overall']-deltas['baseline_overall'])*100:+.2f} pp",
+        )
     with kpi_cols[1]:
-        st.metric("Additional Activations", f"+{deltas['delta_activations']:,.0f}")
+        st.metric(
+            "Conversion Lift",
+            f"{deltas['overall_lift_pct']:+.1f}%",
+        )
     with kpi_cols[2]:
-        st.metric("Additional Purchases", f"+{deltas['delta_purchases']:,.0f}")
-    with kpi_cols[3]:
-        st.metric("Conversion Lift", f"+{deltas['overall_lift_pct']:.1f}%")
-    with kpi_cols[4]:
-        st.metric("Revenue Increase", f"+${deltas['delta_revenue']:,.0f}")
+        st.metric(
+            "Revenue Increase",
+            f"${deltas['delta_revenue']:+,.0f}",
+        )
 
     chart_cols = st.columns(2)
     with chart_cols[0]:
@@ -1334,28 +1399,55 @@ def render_experiment_simulator(funnel_counts: pd.DataFrame, user_flags: pd.Data
         fig = create_simulator_incremental_chart(deltas)
         st.plotly_chart(fig, key="sim_incremental_chart", use_container_width=True)
 
-    insight_text = generate_insight(baseline, simulated, lift1, lift2, lift3)
+    st.markdown("### Model Diagnostics")
+    stage_rows = []
+    for key, label in [("conv1", "Visit \u2192 Signup"),
+                       ("conv2", "Signup \u2192 Activation"),
+                       ("conv3", "Activation \u2192 Purchase")]:
+        s = models["stages"].get(key)
+        if s is None:
+            continue
+        if s["trained"]:
+            stage_rows.append({
+                "Stage": label,
+                "Trained": "yes",
+                "Samples": f"{s['n_samples']:,}",
+                "Positives": f"{s['n_positive']:,}",
+                "AUC": f"{s['auc']:.3f}" if s["auc"] is not None else "n/a",
+                "Accuracy": f"{s['accuracy']*100:.1f}%" if s["accuracy"] is not None else "n/a",
+            })
+        else:
+            stage_rows.append({
+                "Stage": label,
+                "Trained": "no",
+                "Samples": f"{s['n_samples']:,}",
+                "Positives": f"{s['n_positive']:,}",
+                "AUC": "n/a",
+                "Accuracy": "n/a",
+            })
+    if stage_rows:
+        st.dataframe(pd.DataFrame(stage_rows), hide_index=True, use_container_width=True)
+
+    fig_fi = create_feature_importance_chart(models["stages"])
+    st.plotly_chart(fig_fi, key="sim_feature_importance", use_container_width=True)
+
+    insight_text = generate_ml_insight(models, sim, deltas)
     st.info(f"**Insight:** {insight_text}")
 
     with st.expander("Detailed Numbers"):
         comparison_data = {
             "Stage": ["Visit", "Signup", "Activation", "Purchase"],
             "Baseline": [baseline["visited"], baseline["signed_up"], baseline["activated"], baseline["purchased"]],
-            "Simulated": [simulated["visited"], simulated["signed_up"], simulated["activated"], simulated["purchased"]],
+            "Simulated (ML)": [simulated["visited"], simulated["signed_up"], simulated["activated"], simulated["purchased"]],
             "Difference": [0, deltas["delta_signups"], deltas["delta_activations"], deltas["delta_purchases"]],
         }
         comparison_df = pd.DataFrame(comparison_data)
         comparison_df["Baseline"] = comparison_df["Baseline"].apply(lambda x: f"{x:,.0f}")
-        comparison_df["Simulated"] = comparison_df["Simulated"].apply(lambda x: f"{x:,.0f}")
-        comparison_df["Difference"] = comparison_df["Difference"].apply(lambda x: f"+{x:,.0f}" if x >= 0 else f"{x:,.0f}")
+        comparison_df["Simulated (ML)"] = comparison_df["Simulated (ML)"].apply(lambda x: f"{x:,.0f}")
+        comparison_df["Difference"] = comparison_df["Difference"].apply(
+            lambda x: f"+{x:,.0f}" if x >= 0 else f"{x:,.0f}"
+        )
         st.dataframe(comparison_df, hide_index=True, use_container_width=True)
-
-        rate_data = {
-            "Transition": ["Visit → Signup", "Signup → Activation", "Activation → Purchase"],
-            "Baseline Rate": [f"{baseline['conv1']*100:.2f}%", f"{baseline['conv2']*100:.2f}%", f"{baseline['conv3']*100:.2f}%"],
-            "Simulated Rate": [f"{simulated['conv1']*100:.2f}%", f"{simulated['conv2']*100:.2f}%", f"{simulated['conv3']*100:.2f}%"],
-        }
-        st.dataframe(pd.DataFrame(rate_data), hide_index=True, use_container_width=True)
 
 
 def render_dashboard():
